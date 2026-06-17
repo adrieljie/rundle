@@ -4,8 +4,65 @@ import "./App.css";
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
+const getStoredToken = () => {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("token") || sessionStorage.getItem("token") || "";
+};
+
+const getStoredUser = () => {
+  if (typeof window === "undefined") return null;
+
+  const savedUser = localStorage.getItem("user") || sessionStorage.getItem("user");
+
+  if (!savedUser) return null;
+
+  try {
+    return JSON.parse(savedUser);
+  } catch {
+    return null;
+  }
+};
+
+const saveAuthSession = (token, user) => {
+  localStorage.setItem("token", token);
+  localStorage.setItem("user", JSON.stringify(user));
+  sessionStorage.removeItem("token");
+  sessionStorage.removeItem("user");
+};
+
+const clearAuthSession = () => {
+  localStorage.removeItem("token");
+  localStorage.removeItem("user");
+  sessionStorage.removeItem("token");
+  sessionStorage.removeItem("user");
+};
+
+const getAuthHeaders = (headers = {}, token = getStoredToken()) => {
+  if (!token) return headers;
+  return {
+    ...headers,
+    Authorization: `Bearer ${token}`,
+  };
+};
+
+const getDisplayName = (user) => {
+  return user?.name?.trim() || "Runner";
+};
+
+
 function App() {
-  const [activePage, setActivePage] = useState("dashboard");
+  const [activePage, setActivePage] = useState(() =>
+    getStoredToken() ? "dashboard" : "login"
+  );
+  const [authUser, setAuthUser] = useState(() => getStoredUser());
+  const [authForm, setAuthForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+    confirmPassword: "",
+  });
+  const [authMessage, setAuthMessage] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
 
   const [form, setForm] = useState({
     title: "",
@@ -15,6 +72,8 @@ function App() {
   });
 
   const pageTitles = {
+    login: "Log In | Rundle",
+    signup: "Sign Up | Rundle",
     dashboard: "Dashboard | Rundle",
     generate: "Generate Schedule | Rundle",
     schedules: "My Schedules | Rundle",
@@ -131,10 +190,143 @@ function App() {
     return "";
   };
 
-  const loadSchedules = async () => {
+  const handleAuthChange = (e) => {
+    setAuthForm({
+      ...authForm,
+      [e.target.name]: e.target.value,
+    });
+  };
+
+  const resetPrivateData = () => {
+    setGeneratedPlan(null);
+    setSavedSchedules([]);
+    setSelectedSchedule(null);
+    setSelectedDashboardDay("Monday");
+    setEditingDay(null);
+  };
+
+  const handleLogout = () => {
+    clearAuthSession();
+    setAuthUser(null);
+    resetPrivateData();
+    setAuthMessage("");
+    setActivePage("login");
+  };
+
+  const handleSignin = async (e) => {
+    e.preventDefault();
+
+    if (!authForm.email.trim() || !authForm.password.trim()) {
+      setAuthMessage("Please fill in your e-mail and password.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthMessage("");
+
     try {
-      const response = await fetch(`${API_BASE_URL}/schedules`);
+      const response = await fetch(`${API_BASE_URL}/signin`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: authForm.email,
+          password: authForm.password,
+        }),
+      });
+
       const data = await parseJsonResponse(response);
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(data.detail, "Failed to sign in."));
+      }
+
+      saveAuthSession(data.access_token, data.user);
+      setAuthUser(data.user);
+      setAuthForm({ name: "", email: "", password: "", confirmPassword: "" });
+      setActivePage("dashboard");
+      await loadSchedules(data.access_token);
+    } catch (error) {
+      setAuthMessage(error.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignup = async (e) => {
+    e.preventDefault();
+
+    if (
+      !authForm.name.trim() ||
+      !authForm.email.trim() ||
+      !authForm.password.trim() ||
+      !authForm.confirmPassword.trim()
+    ) {
+      setAuthMessage("Please fill in your full name, e-mail, password, and confirm password.");
+      return;
+    }
+
+    if (authForm.password !== authForm.confirmPassword) {
+      setAuthMessage("Password and confirm password do not match.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthMessage("");
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/signup`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: authForm.name,
+          email: authForm.email,
+          password: authForm.password,
+        }),
+      });
+
+      const data = await parseJsonResponse(response);
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(data.detail, "Failed to sign up."));
+      }
+
+      saveAuthSession(data.access_token, data.user);
+      setAuthUser(data.user);
+      setAuthForm({ name: "", email: "", password: "", confirmPassword: "" });
+      setActivePage("dashboard");
+      await loadSchedules(data.access_token);
+    } catch (error) {
+      setAuthMessage(error.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const requireLogin = () => {
+    setAuthMessage("Please log in first.");
+    setActivePage("login");
+  };
+
+  const loadSchedules = async (authToken = getStoredToken()) => {
+    if (!authToken) {
+      setSavedSchedules([]);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/schedules`, {
+        headers: getAuthHeaders({}, authToken),
+      });
+      const data = await parseJsonResponse(response);
+
+      if (response.status === 401) {
+        handleLogout();
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(getErrorMessage(data.detail, "Failed to load schedules."));
@@ -147,7 +339,8 @@ function App() {
   };
 
   useEffect(() => {
-    loadSchedules();
+    const token = getStoredToken();
+    if (token) loadSchedules(token);
   }, []);
 
   const buildPayload = () => {
@@ -224,15 +417,22 @@ function App() {
       return;
     }
 
+    const token = getStoredToken();
+
+    if (!token) {
+      requireLogin();
+      return;
+    }
+
     setLoading(true);
     clearPageMessage("saved");
 
     try {
       const response = await fetch(`${API_BASE_URL}/weekly-plan/save`, {
         method: "POST",
-        headers: {
+        headers: getAuthHeaders({
           "Content-Type": "application/json",
-        },
+        }, token),
         body: JSON.stringify(buildPayload()),
       });
 
@@ -257,8 +457,18 @@ function App() {
     clearPageMessage("schedules");
     clearPageMessage("detail");
 
+    const token = getStoredToken();
+
+    if (!token) {
+      requireLogin();
+      setLoading(false);
+      return;
+    }
+
     try {
-      const response = await fetch(`${API_BASE_URL}/schedules/${scheduleId}`);
+      const response = await fetch(`${API_BASE_URL}/schedules/${scheduleId}`, {
+        headers: getAuthHeaders({}, token),
+      });
       const data = await parseJsonResponse(response);
 
       if (!response.ok) {
@@ -278,6 +488,13 @@ function App() {
     const confirmDelete = confirm("Are you sure you want to delete this schedule?");
     if (!confirmDelete) return;
 
+    const token = getStoredToken();
+
+    if (!token) {
+      requireLogin();
+      return;
+    }
+
     setLoading(true);
     clearPageMessage("schedules");
     clearPageMessage("detail");
@@ -285,6 +502,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE_URL}/schedules/${scheduleId}`, {
         method: "DELETE",
+        headers: getAuthHeaders({}, token),
       });
 
       const data = await parseJsonResponse(response);
@@ -334,6 +552,13 @@ function App() {
       return;
     }
 
+    const token = getStoredToken();
+
+    if (!token) {
+      requireLogin();
+      return;
+    }
+
     setLoading(true);
     clearPageMessage("detail");
 
@@ -342,9 +567,9 @@ function App() {
         `${API_BASE_URL}/schedules/${selectedSchedule.id}/day/${editingDay}`,
         {
           method: "PATCH",
-          headers: {
+          headers: getAuthHeaders({
             "Content-Type": "application/json",
-          },
+          }, token),
           body: JSON.stringify({
             workout_type: editForm.workout_type,
             target_distance_km: Number(editForm.target_distance_km),
@@ -371,17 +596,35 @@ function App() {
     }
   };
 
+  if (activePage === "login" || activePage === "signup") {
+    return (
+      <AuthPage
+        mode={activePage}
+        form={authForm}
+        onChange={handleAuthChange}
+        onSignin={handleSignin}
+        onSignup={handleSignup}
+        setActivePage={setActivePage}
+        message={authMessage}
+        loading={authLoading}
+      />
+    );
+  }
+
   return (
     <div className="app">
       <Sidebar
         activePage={activePage}
         setActivePage={setActivePage}
         loadSchedules={loadSchedules}
+        authUser={authUser}
+        onLogout={handleLogout}
       />
 
       <main className="main">
         {activePage === "dashboard" && (
           <Dashboard
+            authUser={authUser}
             latestSchedule={latestSchedule}
             savedSchedules={savedSchedules}
             currentProfile={currentProfile}
@@ -432,13 +675,163 @@ function App() {
           />
         )}
 
-        {activePage === "profile" && <RunnerProfile profile={currentProfile} />}
+        {activePage === "profile" && (
+          <RunnerProfile
+            profile={currentProfile}
+            authUser={authUser}
+            onLogout={handleLogout}
+          />
+        )}
+        <MainFooter />
       </main>
     </div>
   );
 }
 
-function Sidebar({ activePage, setActivePage, loadSchedules }) {
+
+function AuthPage({
+  mode,
+  form,
+  onChange,
+  onSignin,
+  onSignup,
+  setActivePage,
+  message,
+  loading,
+}) {
+  const isLogin = mode === "login";
+
+  return (
+    <div className="auth-page">
+      <video className="auth-page-motion-bg" autoPlay muted loop playsInline>
+        <source src="/motion_graphic.mp4" type="video/mp4" />
+      </video>
+      <div className="auth-page-overlay" />
+
+      <section className="auth-visual">
+        <div className="auth-logo">
+          <img src="/logo.png" alt="rundle logo" />
+        </div>
+
+        <div className="auth-graphic-wrap">
+          <img src="/graphics.png" alt="running schedule preview" />
+        </div>
+
+        <div className="auth-copy">
+          <h2>Input, Generate, Save!</h2>
+          <p>
+            Generate a personalized running schedule that helps you build an
+            effective training & consistency!
+          </p>
+        </div>
+
+        <AuthFooter />
+      </section>
+
+      <main className="auth-content">
+        <section className={isLogin ? "auth-card" : "auth-card signup-card"}>
+          <div className="auth-heading">
+            <h1>{isLogin ? "Welcome Back!" : "Welcome to Rundle!"}</h1>
+            <p>
+              {isLogin
+                ? "Log in to start creating the perfect running schedule."
+                : "Create an account to start creating the perfect running schedule."}
+            </p>
+          </div>
+
+          <form className="auth-form" onSubmit={isLogin ? onSignin : onSignup}>
+            {!isLogin && (
+              <label>
+                Full Name
+                <input
+                  type="text"
+                  name="name"
+                  value={form.name}
+                  onChange={onChange}
+                  placeholder="John Doe"
+                  autoComplete="name"
+                />
+              </label>
+            )}
+
+            <label>
+              E-mail
+              <input
+                type="email"
+                name="email"
+                value={form.email}
+                onChange={onChange}
+                placeholder="johndoe@gmail.com"
+                autoComplete="email"
+              />
+            </label>
+
+            <label>
+              Password
+              <input
+                type="password"
+                name="password"
+                value={form.password}
+                onChange={onChange}
+                placeholder="Enter your password..."
+                autoComplete={isLogin ? "current-password" : "new-password"}
+              />
+            </label>
+
+            {!isLogin && (
+              <label>
+                Confirm Password
+                <input
+                  type="password"
+                  name="confirmPassword"
+                  value={form.confirmPassword}
+                  onChange={onChange}
+                  placeholder="Confirm your password..."
+                  autoComplete="new-password"
+                />
+              </label>
+            )}
+
+            {message && <div className="auth-message">{message}</div>}
+
+            <button className="auth-submit-btn" type="submit" disabled={loading}>
+              {loading ? "Please wait..." : isLogin ? "Sign In" : "Sign Up"}
+            </button>
+          </form>
+
+          <p className="auth-switch-text">
+            {isLogin ? "Don’t have an account? " : "Already have an account? "}
+            <button
+              type="button"
+              onClick={() => {
+                setActivePage(isLogin ? "signup" : "login");
+              }}
+            >
+              {isLogin ? "Sign Up" : "Log In"}
+            </button>
+          </p>
+        </section>
+        <AuthFooter className="auth-mobile-footer" />
+      </main>
+    </div>
+  );
+}
+
+function AuthFooter({ className = "" }) {
+  return (
+    <div className={`auth-footer ${className}`}>
+      <div className="auth-socials">
+        <a href="#" aria-label="TikTok"><TiktokIcon /></a>
+        <a href="#" aria-label="Instagram"><InstagramIcon /></a>
+        <a href="#" aria-label="Facebook"><FacebookIcon /></a>
+        <a href="#" aria-label="X"><XIcon /></a>
+      </div>
+      <p>© 2026 rundle. | All rights reserved.</p>
+    </div>
+  );
+}
+
+function Sidebar({ activePage, setActivePage, loadSchedules, authUser, onLogout }) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const menu = [
@@ -446,13 +839,6 @@ function Sidebar({ activePage, setActivePage, loadSchedules }) {
     { id: "generate", label: "Generate Schedule", icon: <GenerateIcon /> },
     { id: "schedules", label: "My Schedules", icon: <ScheduleIcon /> },
     { id: "profile", label: "Runner Profile", icon: <ProfileIcon /> },
-  ];
-
-  const socials = [
-    { label: "TikTok", href: "#", icon: <TiktokIcon /> },
-    { label: "Instagram", href: "#", icon: <InstagramIcon /> },
-    { label: "Facebook", href: "#", icon: <FacebookIcon /> },
-    { label: "X", href: "#", icon: <XIcon /> },
   ];
 
   const handleMenuClick = (itemId) => {
@@ -490,35 +876,59 @@ function Sidebar({ activePage, setActivePage, loadSchedules }) {
               <span className="sidebar-icon">{item.icon}</span>
               <span>{item.label}</span>
             </button>
+            
           ))}
+          <button className="sidebar-item logout-item" type="button" onClick={onLogout}>
+          <span className="sidebar-icon"><LogoutIcon /></span>
+          <span>Log Out</span>
+        </button>
         </nav>
       </div>
 
       <div className="sidebar-footer">
-        <div className="social-row">
-          {socials.map((item) => (
-            <a
-              key={item.label}
-              href={item.href}
-              className="social-icon"
-              aria-label={item.label}
-            >
-              {item.icon}
-            </a>
-          ))}
-        </div>
-
-        <p className="copyright">
-          © {new Date().getFullYear()} rundle.
-          <br />
-          All rights reserved.
-        </p>
+        {authUser && (
+          <div className="sidebar-user">
+            <span>Signed in as</span>
+            <strong>{authUser.name}</strong>
+          </div>
+        )}
       </div>
     </aside>
   );
 }
 
+function MainFooter() {
+  const socials = [
+    { label: "TikTok", href: "#", icon: <TiktokIcon /> },
+    { label: "Instagram", href: "#", icon: <InstagramIcon /> },
+    { label: "Facebook", href: "#", icon: <FacebookIcon /> },
+    { label: "X", href: "#", icon: <XIcon /> },
+  ];
+
+  return (
+    <footer className="main-footer">
+      <p className="main-footer-copyright">
+        © {new Date().getFullYear()} rundle. All rights reserved.
+      </p>
+
+      <div className="main-footer-socials">
+        {socials.map((item) => (
+          <a
+            key={item.label}
+            href={item.href}
+            className="social-icon"
+            aria-label={item.label}
+          >
+            {item.icon}
+          </a>
+        ))}
+      </div>
+    </footer>
+  );
+}
+
 function Dashboard({
+  authUser,
   latestSchedule,
   savedSchedules,
   currentProfile,
@@ -529,10 +939,11 @@ function Dashboard({
   const schedule = latestSchedule?.weekly_plan?.schedule || [];
   const selectedDayData =
     schedule.find((item) => item.day === selectedDashboardDay) || schedule[0];
+  const displayName = getDisplayName(authUser);
 
   return (
     <section className="page dashboard-page">
-      <h1>Welcome, Runner!</h1>
+      <h1>Welcome, {displayName}!</h1>
       <p className="subtitle">Explore and create your perfect running schedules.</p>
 
       <div className="dashboard-top-grid">
@@ -927,15 +1338,24 @@ function ScheduleDetail({
   );
 }
 
-function RunnerProfile({ profile }) {
+function RunnerProfile({ profile, authUser, onLogout }) {
   const notes = getProfileNotes(profile);
+  const displayName = getDisplayName(authUser);
 
   return (
     <section className="page">
-      <h1>Runner Profile</h1>
-      <p className="subtitle">
-        AI-based runner insight from your latest generated or saved plan.
-      </p>
+      <div className="profile-page-header">
+        <div>
+          <h1>{displayName}’s Profile</h1>
+          <p className="subtitle">
+            AI-based runner insight from your latest generated or saved plan.
+          </p>
+        </div>
+
+        <button className="primary-btn profile-logout-btn" onClick={onLogout}>
+          Log Out
+        </button>
+      </div>
 
       {!profile ? (
         <div className="empty-large-card">
@@ -1246,6 +1666,16 @@ function CloseIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M6.23 4.82a1 1 0 0 1 1.41 0L12 9.17l4.36-4.35a1 1 0 1 1 1.41 1.41L13.41 10.6l4.36 4.36a1 1 0 0 1-1.41 1.41L12 12.01l-4.36 4.36a1 1 0 1 1-1.41-1.41l4.36-4.36-4.36-4.37a1 1 0 0 1 0-1.41Z" />
+    </svg>
+  );
+}
+
+
+function LogoutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5.75 3A2.75 2.75 0 0 0 3 5.75v12.5A2.75 2.75 0 0 0 5.75 21h6.5A2.75 2.75 0 0 0 15 18.25v-2.5a1 1 0 1 0-2 0v2.5c0 .41-.34.75-.75.75h-6.5a.75.75 0 0 1-.75-.75V5.75c0-.41.34-.75.75-.75h6.5c.41 0 .75.34.75.75v2.5a1 1 0 1 0 2 0v-2.5A2.75 2.75 0 0 0 12.25 3h-6.5Z" />
+      <path d="M16.7 8.29a1 1 0 0 1 1.42 0l3 3a1 1 0 0 1 0 1.42l-3 3a1 1 0 0 1-1.42-1.42L18 13h-8a1 1 0 1 1 0-2h8l-1.3-1.29a1 1 0 0 1 0-1.42Z" />
     </svg>
   );
 }
