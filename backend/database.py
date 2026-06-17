@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Date
+from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Date, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 
@@ -18,11 +18,22 @@ SessionLocal = sessionmaker(
 
 Base = declarative_base()
 
+class UserDB(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 class RunningScheduleDB(Base):
     __tablename__ = "running_schedules"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String, default="My Running Schedule")
 
     distance = Column(Float)

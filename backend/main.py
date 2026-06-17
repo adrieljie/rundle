@@ -12,13 +12,16 @@ import json
 
 from sqlalchemy.orm import Session
 
-from database import create_tables, get_db, RunningScheduleDB
+from database import create_tables, get_db, RunningScheduleDB, UserDB
+from fastapi.security import OAuth2PasswordBearer
+from passlib.context import CryptContext
+from jose import jwt, JWTError
 
 
 app = FastAPI(
     title="AI Running Schedule API",
     description="Weekly running schedule recommendation backend based on KMeans clustering.",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 
@@ -34,6 +37,11 @@ app.add_middleware(
 create_tables()
 
 APP_TZ = ZoneInfo("Asia/Jakarta")
+SECRET_KEY = "rundle_secret_key_ganti_nanti"
+ALGORITHM = "HS256"
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/signin")
 
 
 MODEL_PATH = Path("model/running_schedule_model.pkl")
@@ -54,6 +62,15 @@ class RunnerInput(BaseModel):
     pace: Optional[str] = Field(None, example="7:30")
     plan_start_date: Optional[DateType] = Field(None, example="2026-06-15")
 
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class SigninRequest(BaseModel):
+    email: str
+    password: str
 
 class ScheduleItem(BaseModel):
     day: str = Field(..., example="Monday")
@@ -346,6 +363,38 @@ def db_schedule_to_response(schedule_db: RunningScheduleDB):
         "updated_at": schedule_db.updated_at
     }
 
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str):
+    return pwd_context.verify(password, password_hash)
+
+
+def create_access_token(data: dict):
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
+
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(UserDB).filter(UserDB.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
 
 @app.get("/")
 def home():
@@ -366,6 +415,65 @@ def model_info():
         "model_type": str(type(model)),
         "feature_names": feature_names,
         "cluster_profiles": CLUSTER_PROFILE
+    }
+
+@app.post("/signup")
+def signup(data: SignupRequest, db: Session = Depends(get_db)):
+    existing_user = db.query(UserDB).filter(UserDB.email == data.email).first()
+
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered.")
+
+    new_user = UserDB(
+        name=data.name,
+        email=data.email,
+        password_hash=hash_password(data.password),
+        created_at=datetime.utcnow()
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    token = create_access_token({
+        "user_id": new_user.id
+    })
+
+    return {
+        "message": "Signup successful.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": new_user.id,
+            "name": new_user.name,
+            "email": new_user.email
+        }
+    }
+
+
+@app.post("/signin")
+def signin(data: SigninRequest, db: Session = Depends(get_db)):
+    user = db.query(UserDB).filter(UserDB.email == data.email).first()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    if not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    token = create_access_token({
+        "user_id": user.id
+    })
+
+    return {
+        "message": "Signin successful.",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email
+        }
     }
 
 
@@ -419,7 +527,8 @@ def weekly_plan(data: RunnerInput):
 @app.post("/weekly-plan/save")
 def generate_and_save_weekly_plan(
     data: RunnerInput,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     pace_min_per_km = get_pace_min_per_km(data)
 
@@ -446,6 +555,7 @@ def generate_and_save_weekly_plan(
     total_weekly_distance = calculate_total_distance(schedule)
 
     new_schedule = RunningScheduleDB(
+        user_id=current_user.id,
         title=data.title or "My Running Schedule",
         distance=data.distance,
         pace_min_per_km=pace_min_per_km,
@@ -473,8 +583,13 @@ def generate_and_save_weekly_plan(
 
 
 @app.get("/schedules")
-def get_all_schedules(db: Session = Depends(get_db)):
-    schedules = db.query(RunningScheduleDB).order_by(RunningScheduleDB.id.desc()).all()
+def get_all_schedules(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    schedules = db.query(RunningScheduleDB).filter(
+        RunningScheduleDB.user_id == current_user.id
+    ).order_by(RunningScheduleDB.id.desc()).all()
 
     return {
         "total": len(schedules),
@@ -485,10 +600,12 @@ def get_all_schedules(db: Session = Depends(get_db)):
 @app.get("/schedules/{schedule_id}")
 def get_schedule_by_id(
     schedule_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     schedule_db = db.query(RunningScheduleDB).filter(
-        RunningScheduleDB.id == schedule_id
+        RunningScheduleDB.id == schedule_id,
+        RunningScheduleDB.user_id == current_user.id
     ).first()
 
     if not schedule_db:
@@ -504,10 +621,12 @@ def get_schedule_by_id(
 def update_full_schedule(
     schedule_id: int,
     data: UpdateScheduleRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     schedule_db = db.query(RunningScheduleDB).filter(
-        RunningScheduleDB.id == schedule_id
+        RunningScheduleDB.id == schedule_id,
+        RunningScheduleDB.user_id == current_user.id
     ).first()
 
     if not schedule_db:
@@ -552,10 +671,12 @@ def update_schedule_day(
     schedule_id: int,
     day: str,
     data: UpdateDayRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     schedule_db = db.query(RunningScheduleDB).filter(
-        RunningScheduleDB.id == schedule_id
+        RunningScheduleDB.id == schedule_id,
+        RunningScheduleDB.user_id == current_user.id
     ).first()
 
     if not schedule_db:
@@ -600,10 +721,12 @@ def update_schedule_day(
 @app.delete("/schedules/{schedule_id}")
 def delete_schedule(
     schedule_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
 ):
     schedule_db = db.query(RunningScheduleDB).filter(
-        RunningScheduleDB.id == schedule_id
+        RunningScheduleDB.id == schedule_id,
+        RunningScheduleDB.user_id == current_user.id
     ).first()
 
     if not schedule_db:

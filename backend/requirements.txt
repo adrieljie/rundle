@@ -5,3 +5,7 @@ numpy
 scikit-learn==1.6.1
 joblib
 sqlalchemy
+passlib[bcrypt]
+bcrypt==4.0.1
+python-jose[cryptography]
+python-multipart
